@@ -1,0 +1,67 @@
+{
+  "best_model": "Random Forest",
+  "model_keys": {
+    "Logistic Regression": "lr",
+    "Decision Tree": "dt",
+    "Random Forest": "rf",
+    "KNN": "knn"
+  },
+  "sklearn_version": "1.9.1",
+  "thresh_min": 0.45,
+  "all_results": {
+    "Logistic Regression": {
+      "Accuracy": 0.7388,
+      "Precision": 0.5051,
+      "Recall": 0.7995,
+      "F1": 0.619,
+      "ROC-AUC": 0.838,
+      "Threshold": 0.48,
+      "Best Params": {
+        "C": 0.01,
+        "penalty": "l2"
+      }
+    },
+    "Decision Tree": {
+      "Accuracy": 0.7459,
+      "Precision": 0.514,
+      "Recall": 0.7834,
+      "F1": 0.6208,
+      "ROC-AUC": 0.8162,
+      "Threshold": 0.45,
+      "Best Params": {
+        "criterion": "gini",
+        "max_depth": 3,
+        "min_samples_leaf": 1,
+        "min_samples_split": 2
+      }
+    },
+    "Random Forest": {
+      "Accuracy": 0.7658,
+      "Precision": 0.5407,
+      "Recall": 0.7807,
+      "F1": 0.6389,
+      "ROC-AUC": 0.8435,
+      "Threshold": 0.53,
+      "Best Params": {
+        "max_depth": 8,
+        "max_features": "sqrt",
+        "min_samples_leaf": 3,
+        "n_estimators": 400
+      }
+    },
+    "KNN": {
+      "Accuracy": 0.7814,
+      "Precision": 0.5825,
+      "Recall": 0.623,
+      "F1": 0.6021,
+      "ROC-AUC": 0.8267,
+      "Threshold": 0.46,
+      "Best Params": {
+        "metric": "manhattan",
+        "n_neighbors": 31,
+        "p": 1,
+        "weights": "uniform"
+      }
+    }
+  }
+}
