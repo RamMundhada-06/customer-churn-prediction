@@ -9,6 +9,10 @@ import joblib
 import numpy as np
 import pandas as pd
 import streamlit as st
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import (
+    accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Page config
@@ -64,13 +68,17 @@ st.markdown("""
 .hero h1 { margin: 0; font-size: 1.8rem; color: #fff; font-weight: 800; }
 .hero p  { margin: .3rem 0 0; color: rgba(255,255,255,0.88); font-size: .95rem; }
 
-/* ── Risk badges ── */
-.risk-high   { background:#fee2e2; color:#991b1b; border:1px solid #fca5a5;
-               border-radius:8px; padding:.3rem .75rem; font-weight:700; }
-.risk-medium { background:#fef3c7; color:#92400e; border:1px solid #fcd34d;
-               border-radius:8px; padding:.3rem .75rem; font-weight:700; }
-.risk-low    { background:#d1fae5; color:#065f46; border:1px solid #6ee7b7;
-               border-radius:8px; padding:.3rem .75rem; font-weight:700; }
+/* ── Risk & Decision badges ── */
+.risk-high      { background:#fee2e2; color:#991b1b; border:1px solid #fca5a5;
+                  border-radius:8px; padding:.3rem .75rem; font-weight:700; }
+.risk-medium    { background:#fef3c7; color:#92400e; border:1px solid #fcd34d;
+                  border-radius:8px; padding:.3rem .75rem; font-weight:700; }
+.risk-low       { background:#d1fae5; color:#065f46; border:1px solid #6ee7b7;
+                  border-radius:8px; padding:.3rem .75rem; font-weight:700; }
+.decision-churn { background:#fee2e2; color:#b91c1c; border:1.5px solid #ef4444;
+                  border-radius:10px; padding:.4rem .9rem; font-weight:800; display:inline-block; }
+.decision-stay  { background:#dcfce7; color:#15803d; border:1.5px solid #22c55e;
+                  border-radius:10px; padding:.4rem .9rem; font-weight:800; display:inline-block; }
 
 /* ── Large probability number ── */
 .prob-label { font-size: 2.8rem; font-weight: 800; text-align: center; }
@@ -162,6 +170,32 @@ def load_model(key: str):
     )
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Test set evaluation cache (for real-time metrics across thresholds)
+# ─────────────────────────────────────────────────────────────────────────────
+@st.cache_data
+def get_test_eval_data():
+    csv_path = pathlib.Path("Telco-Customer-Churn.csv")
+    if not csv_path.exists():
+        return None, None
+    df = pd.read_csv(csv_path)
+    df["TotalCharges"] = pd.to_numeric(df["TotalCharges"], errors="coerce").fillna(0)
+    df = df.drop(columns=["customerID"]).replace({"No internet service": "No", "No phone service": "No"})
+    df["Churn"] = df["Churn"].map({"Yes": 1, "No": 0})
+    _, X_test, _, y_test = train_test_split(
+        df.drop(columns="Churn"), df["Churn"],
+        test_size=0.2, stratify=df["Churn"], random_state=42
+    )
+    return X_test, y_test.values
+
+@st.cache_data
+def get_test_probabilities(key: str):
+    m = load_model(key)
+    X_test, y_test = get_test_eval_data()
+    if X_test is None:
+        return None, None
+    return m.predict_proba(X_test)[:, 1], y_test
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Sidebar
 # ─────────────────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -200,14 +234,54 @@ with st.sidebar:
               f"Tuned default for {selected_model}: {default_thresh}"),
     )
     st.caption(
-        f"Tuned default: **{default_thresh}** &nbsp;|&nbsp; Active: **{threshold}**"
+        f"Tuned default: **{default_thresh}** &nbsp;|&nbsp; Active: **{threshold:.2f}**"
     )
 
     st.divider()
 
-    # ── Model metrics ─────────────────────────────────────────────────────────
-    st.markdown(f"### {m_info['icon']} {selected_model} — Test Metrics")
-    if m_results:
+    # ── Model metrics (Computed live at current threshold) ───────────────────
+    st.markdown(f"### {m_info['icon']} {selected_model} — Test Performance")
+    test_probs, y_true = get_test_probabilities(m_info["key"])
+
+    if test_probs is not None and y_true is not None:
+        test_preds = (test_probs >= threshold).astype(int)
+        cur_acc  = accuracy_score(y_true, test_preds)
+        cur_prec = precision_score(y_true, test_preds, zero_division=0)
+        cur_rec  = recall_score(y_true, test_preds, zero_division=0)
+        cur_f1   = f1_score(y_true, test_preds, zero_division=0)
+        cur_auc  = roc_auc_score(y_true, test_probs)
+
+        # Baseline at tuned default threshold for deltas
+        def_preds = (test_probs >= default_thresh).astype(int)
+        def_f1    = f1_score(y_true, def_preds, zero_division=0)
+        def_prec  = precision_score(y_true, def_preds, zero_division=0)
+        def_rec   = recall_score(y_true, def_preds, zero_division=0)
+        def_acc   = accuracy_score(y_true, def_preds)
+
+        show_deltas = abs(threshold - default_thresh) >= 0.005
+
+        c1, c2 = st.columns(2)
+        c1.metric("ROC-AUC", f"{cur_auc:.4f}",
+                  help="ROC-AUC evaluates overall probability ranking across all cutoffs (threshold-independent).")
+        c2.metric("F1 Score", f"{cur_f1:.4f}",
+                  delta=f"{cur_f1 - def_f1:+.4f}" if show_deltas else None,
+                  help="Harmonic mean of Precision and Recall at this threshold.")
+        c1.metric("Precision", f"{cur_prec:.4f}",
+                  delta=f"{cur_prec - def_prec:+.4f}" if show_deltas else None,
+                  help="Of customers predicted to churn, % that actually churned.")
+        c2.metric("Recall", f"{cur_rec:.4f}",
+                  delta=f"{cur_rec - def_rec:+.4f}" if show_deltas else None,
+                  help="Of actual churners, % detected by the model.")
+        c1.metric("Accuracy", f"{cur_acc:.4f}",
+                  delta=f"{cur_acc - def_acc:+.4f}" if show_deltas else None,
+                  help="Overall correct classifications.")
+
+        st.caption(
+            f"⚡ Metrics live at **threshold = {threshold:.2f}** "
+            + (f"(vs default {default_thresh:.2f})" if show_deltas else "(tuned default)")
+        )
+        st.caption("ℹ️ *Higher threshold raises Precision; lower threshold raises Recall.*")
+    elif m_results:
         c1, c2 = st.columns(2)
         c1.metric("ROC-AUC",   m_results.get("ROC-AUC",  "—"))
         c2.metric("F1 Score",  m_results.get("F1",       "—"))
@@ -321,60 +395,112 @@ with tab_predict:
         }])
 
         prob = float(model.predict_proba(row)[0, 1])
-        pct  = round(prob * 100, 1)
+        st.session_state["prediction_data"] = {
+            "prob": prob,
+            "row": row,
+            "tenure": tenure,
+            "monthly": monthly,
+            "contract": contract,
+            "internet": internet,
+            "security": security,
+            "tech": tech,
+            "payment": payment,
+            "senior": senior,
+            "model_name": selected_model,
+        }
 
-        # Risk level
-        if prob >= threshold + 0.15:
-            risk_label, risk_cls, risk_icon = "HIGH RISK",   "risk-high",   "🔴"
-            tip = "**Action needed:** Offer a loyalty discount, service upgrade, or a dedicated account manager."
-        elif prob >= threshold:
-            risk_label, risk_cls, risk_icon = "MEDIUM RISK", "risk-medium", "🟠"
-            tip = "**Watch closely:** Schedule a proactive check-in call and highlight recent service improvements."
+    # Render prediction card if user has clicked Predict
+    if "prediction_data" in st.session_state and st.session_state["prediction_data"] is not None:
+        p_data = st.session_state["prediction_data"]
+
+        # If user switched model in sidebar, re-evaluate probability with the active model
+        if p_data.get("model_name") != selected_model:
+            prob = float(model.predict_proba(p_data["row"])[0, 1])
+            p_data["prob"] = prob
+            p_data["model_name"] = selected_model
         else:
-            risk_label, risk_cls, risk_icon = "LOW RISK",    "risk-low",    "🟢"
-            tip = "**Keep it up:** Maintain service quality. Consider a referral reward to deepen loyalty."
+            prob = p_data["prob"]
+
+        pct = round(prob * 100, 1)
+        thresh_pct = round(threshold * 100, 1)
+        will_churn = prob >= threshold
+
+        # Decision & Risk classification based on active threshold
+        if will_churn:
+            decision_text = "PREDICTION: WILL CHURN"
+            decision_class = "decision-churn"
+            decision_icon = "🚨"
+            bar_color = "#ef4444"
+            if prob >= threshold + 0.15:
+                risk_label, risk_cls, risk_icon = "HIGH RISK", "risk-high", "🔴"
+                tip = "**High churn probability:** Well above threshold. Offer a loyalty discount, contract upgrade, or dedicated account check-in."
+            else:
+                risk_label, risk_cls, risk_icon = "MODERATE RISK", "risk-medium", "🟠"
+                tip = "**Above threshold:** Churn risk detected. Proactively reach out to discuss service value and satisfaction."
+        else:
+            decision_text = "PREDICTION: WILL STAY"
+            decision_class = "decision-stay"
+            decision_icon = "🟢"
+            bar_color = "#10b981"
+            if prob >= threshold - 0.15:
+                risk_label, risk_cls, risk_icon = "BORDERLINE / WATCH", "risk-medium", "🟡"
+                tip = "**Close to cutoff:** Churn probability is below threshold, but monitor for bill changes or support tickets."
+            else:
+                risk_label, risk_cls, risk_icon = "LOW RISK", "risk-low", "🟢"
+                tip = "**Healthy account:** Safely below threshold cutoff. Maintain service quality and consider loyalty rewards."
 
         # ── Result card ───────────────────────────────────────────────────────
         st.divider()
-        bar_color = {
-            "risk-high":   "#ef4444",
-            "risk-medium": "#f59e0b",
-            "risk-low":    "#10b981",
-        }[risk_cls]
 
         st.markdown(f"""
 <div class="card" style="border-left: 4px solid {bar_color};">
-  <h3>📊 Prediction Result
+  <h3>📊 Prediction Decision & Cutoff Analysis
     <span style="font-size:.8rem;font-weight:400;text-transform:none;color:#64748b;">
-      via {m_info['icon']} {selected_model} &nbsp;|&nbsp; threshold = {threshold}
+      via {m_info['icon']} {selected_model} &nbsp;|&nbsp; active threshold = {threshold:.2f}
     </span>
   </h3>
 </div>""", unsafe_allow_html=True)
 
-        r1, r2, r3 = st.columns([1, 2, 1])
+        r1, r2, r3 = st.columns([1.2, 1.8, 1])
 
         with r1:
             st.markdown(
-                f"<div style='text-align:center;padding-top:1.2rem;'>"
-                f"<div style='font-size:3.5rem;'>{risk_icon}</div>"
-                f"<span class='{risk_cls}'>{risk_label}</span>"
+                f"<div style='text-align:center;padding-top:.8rem;'>"
+                f"<div style='font-size:3.2rem;'>{decision_icon}</div>"
+                f"<span class='{decision_class}'>{decision_text}</span><br><br>"
+                f"<span class='{risk_cls}'>{risk_icon} {risk_label}</span>"
                 f"</div>", unsafe_allow_html=True)
 
         with r2:
             st.markdown(
                 f"<div class='prob-label' style='color:{bar_color};'>{pct}%</div>",
                 unsafe_allow_html=True)
-            st.caption("Churn Probability")
+            st.caption("Predicted Churn Probability")
             st.progress(prob)
-            st.markdown(
-                f"<small style='color:#64748b;'>Threshold: <b>{threshold}</b>"
-                f" &nbsp;|&nbsp; Model: <b>{selected_model}</b></small>",
-                unsafe_allow_html=True)
+
+            # Clear threshold rule explanation
+            cmp_sign = "≥" if will_churn else "<"
+            outcome_str = "Customer predicted to CHURN" if will_churn else "Customer predicted to STAY"
+            st.markdown(f"""
+<div style="background:#f8f9ff;border:1px solid #c7cdf0;border-radius:8px;padding:.5rem .8rem;margin-top:.4rem;font-size:.85rem;">
+  <b>Decision Rule:</b> Probability (<b>{pct}%</b>) {cmp_sign} Threshold (<b>{thresh_pct}%</b>)<br>
+  👉 <b style="color:{bar_color};">{outcome_str}</b>
+</div>
+""", unsafe_allow_html=True)
 
         with r3:
-            st.metric("Tenure",   f"{tenure} mo")
-            st.metric("Monthly",  f"${monthly:.0f}")
-            st.metric("Contract", contract.split()[0])
+            st.metric("Tenure",   f"{p_data['tenure']} mo")
+            st.metric("Monthly",  f"${p_data['monthly']:.0f}")
+            st.metric("Contract", p_data['contract'].split()[0])
+
+        # ── Interactive threshold hint ────────────────────────────────────────
+        st.markdown(f"""
+<div style="background:#f1f5f9;border-left:4px solid #64748b;border-radius:8px;padding:.6rem 1rem;margin-top:.6rem;font-size:.85rem;color:#334155;">
+  💡 <b>How Threshold Controls the Decision:</b><br>
+  Move the <b>Decision Threshold</b> slider in the sidebar to change the cutoff point.
+  Setting threshold <b>&gt; {pct}%</b> flips the outcome to <b>STAY</b>, while setting it <b>≤ {pct}%</b> classifies as <b>CHURN</b>.
+</div>
+""", unsafe_allow_html=True)
 
         # ── Retention tip ─────────────────────────────────────────────────────
         tip_bg = {
@@ -391,25 +517,25 @@ with tab_predict:
         # ── Risk factor breakdown ─────────────────────────────────────────────
         st.markdown("#### 🔍 Key Risk Factors")
         factors = []
-        if contract == "Month-to-month":
+        if p_data["contract"] == "Month-to-month":
             factors.append(("📄 Month-to-month contract",
                             "No commitment lock-in — strongest individual churn predictor."))
-        if internet == "Fiber optic" and security == "No":
+        if p_data["internet"] == "Fiber optic" and p_data["security"] == "No":
             factors.append(("🔒 No Online Security (Fiber)",
                             "Fiber customers without security churn ~2× more."))
-        if tenure < 12:
+        if p_data["tenure"] < 12:
             factors.append(("⏱️ Short tenure (<12 months)",
                             "New customers are the highest churn risk — still evaluating the service."))
-        if monthly > 70 and contract == "Month-to-month":
+        if p_data["monthly"] > 70 and p_data["contract"] == "Month-to-month":
             factors.append(("💸 High charge + no commitment",
                             "Price-sensitive customers on flexible plans often switch for a better deal."))
-        if tech == "No" and internet != "No":
+        if p_data["tech"] == "No" and p_data["internet"] != "No":
             factors.append(("🛠️ No Tech Support",
                             "Lack of support increases frustration-driven churn, especially on Fiber."))
-        if payment == "Electronic check":
+        if p_data["payment"] == "Electronic check":
             factors.append(("💳 Electronic check payment",
                             "Historically the payment method with the highest churn rate in this dataset."))
-        if senior == "Yes":
+        if p_data["senior"] == "Yes":
             factors.append(("👴 Senior Citizen",
                             "Senior customers show a slightly elevated average churn rate."))
 
@@ -433,22 +559,54 @@ with tab_predict:
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_compare:
     st.markdown('<div class="card"><h3>📊 All Models — Side by Side</h3>', unsafe_allow_html=True)
-    st.write("GridSearchCV scored by **F1** (5-fold stratified CV). "
-             "Each threshold independently tuned per model (min 0.45).")
+    st.write(f"Compare model performance at their **independently tuned optimal thresholds** vs live at the **active slider threshold ({threshold:.2f})**.")
     st.markdown("</div>", unsafe_allow_html=True)
 
+    # 1. Performance at active threshold
+    st.markdown(f"#### ⚡ Live Performance Across All Models at Active Threshold = **{threshold:.2f}**")
+    live_rows = []
+    for name, d in MODEL_DISPLAY.items():
+        probs, y_t = get_test_probabilities(d["key"])
+        if probs is not None and y_t is not None:
+            pred_t = (probs >= threshold).astype(int)
+            live_rows.append({
+                "Model": f"{d['icon']} {name}",
+                "F1 Score": f1_score(y_t, pred_t, zero_division=0),
+                "Precision": precision_score(y_t, pred_t, zero_division=0),
+                "Recall": recall_score(y_t, pred_t, zero_division=0),
+                "Accuracy": accuracy_score(y_t, pred_t),
+                "ROC-AUC": roc_auc_score(y_t, probs),
+                "Threshold": f"{threshold:.2f}",
+            })
+    if live_rows:
+        df_live = pd.DataFrame(live_rows).set_index("Model")
+        def highlight_max(s):
+            try:
+                is_max = s.astype(float) == s.astype(float).max()
+                return ["background-color:#eef2ff;font-weight:700;color:#3730a3" if v else "" for v in is_max]
+            except Exception:
+                return [""] * len(s)
+        styled_live = (df_live.style
+                       .apply(highlight_max, subset=["F1 Score", "Precision", "Recall", "Accuracy", "ROC-AUC"])
+                       .format("{:.4f}", subset=["F1 Score", "Precision", "Recall", "Accuracy", "ROC-AUC"]))
+        st.dataframe(styled_live, use_container_width=True)
+        st.caption("ℹ️ *Table above recalculates dynamically whenever you move the Decision Threshold slider in the sidebar.*")
+
+    # 2. Performance at optimal tuned thresholds
+    st.markdown("---")
+    st.markdown("#### 🎯 Performance at Independently Tuned Optimal Thresholds")
     if all_results:
         rows = []
         for name, r in all_results.items():
             icon = MODEL_DISPLAY.get(name, {}).get("icon", "")
             rows.append({
                 "Model":     f"{icon} {name}",
-                "F1":        r.get("F1",       "—"),
+                "F1 Score":  r.get("F1",       "—"),
                 "Precision": r.get("Precision","—"),
                 "Recall":    r.get("Recall",   "—"),
                 "Accuracy":  r.get("Accuracy", "—"),
                 "ROC-AUC":   r.get("ROC-AUC",  "—"),
-                "Threshold": r.get("Threshold","—"),
+                "Optimal Threshold": r.get("Threshold","—"),
             })
         df_cmp = pd.DataFrame(rows).set_index("Model")
 
@@ -462,9 +620,9 @@ with tab_compare:
 
         styled = (df_cmp.style
                   .apply(highlight_best,
-                         subset=["F1","Precision","Recall","Accuracy","ROC-AUC"])
+                         subset=["F1 Score","Precision","Recall","Accuracy","ROC-AUC"])
                   .format("{:.4f}",
-                          subset=["F1","Precision","Recall","Accuracy","ROC-AUC"]))
+                          subset=["F1 Score","Precision","Recall","Accuracy","ROC-AUC"]))
         st.dataframe(styled, use_container_width=True)
 
         # ── Mini model cards ──────────────────────────────────────────────────
